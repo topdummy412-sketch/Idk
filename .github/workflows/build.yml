@@ -1,3 +1,221 @@
+name: Build app
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p "$(dirname 'settings.gradle.kts')"
+          cat > 'settings.gradle.kts' <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Leveler"
+          include(":app")
+          EOF
+          mkdir -p "$(dirname 'build.gradle.kts')"
+          cat > 'build.gradle.kts' <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p "$(dirname 'app/build.gradle.kts')"
+          cat > 'app/build.gradle.kts' <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.leveler"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.leveler"
+                  minSdk = 28
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_lock_silent_mode_off"
+                  android:label="Voice Leveler"
+                  android:theme="@android:style/Theme.Material.Light">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".LevelerService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Applies a volume leveling audio effect while other apps play audio" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/example/leveler/MainActivity.kt')"
+          cat > 'app/src/main/java/com/example/leveler/MainActivity.kt' <<'EOF'
+          package com.example.leveler
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Build
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private var strength = 60
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+
+                  val pad = (24 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(pad, pad * 2, pad, pad)
+                  }
+                  val title = TextView(this).apply { text = "Voice Leveler"; textSize = 28f }
+                  val sw = Switch(this).apply { text = "Keep volume steady   "; textSize = 18f }
+                  val label = TextView(this).apply { text = "Strength: $strength"; setPadding(0, pad, 0, 0) }
+                  val bar = SeekBar(this).apply { max = 100; progress = strength }
+                  val note = TextView(this).apply {
+                      text = "Turn it on, then open YouTube or any app and play a video. " +
+                          "If the volume still jumps, that app is blocking the effect on this phone."
+                      setPadding(0, pad, 0, 0)
+                  }
+                  root.addView(title); root.addView(sw); root.addView(label); root.addView(bar); root.addView(note)
+                  setContentView(root)
+
+                  sw.setOnCheckedChangeListener { _, on ->
+                      if (on) startForegroundService(serviceIntent())
+                      else startService(Intent(this, LevelerService::class.java).setAction(LevelerService.ACTION_STOP))
+                  }
+                  bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                          strength = p
+                          label.text = "Strength: $p"
+                          if (sw.isChecked && fromUser) startService(serviceIntent())
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+              }
+
+              private fun serviceIntent() =
+                  Intent(this, LevelerService::class.java).putExtra(LevelerService.EXTRA_STRENGTH, strength)
+          }
+          EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/example/leveler/LevelerService.kt')"
+          cat > 'app/src/main/java/com/example/leveler/LevelerService.kt' <<'EOF'
+          package com.example.leveler
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.media.audiofx.AudioEffect
+          import android.media.audiofx.DynamicsProcessing
+          import android.os.IBinder
+          import android.os.Build
+
+          class LevelerService : Service() {
+
+              private val effects = HashMap<Int, DynamicsProcessing>()
+              private var strength = 60
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) {
+                      val session = i.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, -1)
+                      if (session < 0) return
+                      if (i.action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) attach(session)
+                      else release(session)
+                  }
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val filter = IntentFilter().apply {
+                      addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+                      addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                  else registerReceiver(receiver, filter)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACTION_STOP) {
+                      stopForeground(STOP_FOREGROUND_REMOVE)
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  strength = intent?.getIntExtra(EXTRA_STRENGTH, strength) ?: strength
+                  startForeground(1, notification())
+                  if (!effects.containsKey(0)) attach(0)
+                  effects.values.forEach { it.setMbcBandAllChannelsTo(0, band()) }
+                  return START_STICKY
+              }
+
+              private fun band(): DynamicsProcessing.MbcBand {
+                  val threshold = -20f - strength * 0.3f
+                  val ratio = 2f + strength * 0.08f
+                  val makeup = minOf(24f, -threshold * (1f - 1f / ratio) * 0.7f)
+                  return DynamicsProcessing.MbcBand(
+                      true, 20000f, 10f, 250f, ratio, threshold, 6f, -70f, 1f, 0f, makeup
+                  )
+              }
+
+              private fun attach(session: Int) {
+                  if (effects.containsKey(session)) return
+                  try {
+                      val cfg = DynamicsProcessing.Config.Builder(
+                          DynamicsProcessing.VARIANT_FAVOR_TIME_RESOLUTION, 2,
                           false, 0, true, 1, false, 0, true
                       )
                           .setMbcBandAllChannelsTo(0, band())
@@ -9,7 +227,7 @@
                       dp.enabled = true
                       effects[session] = dp
                   } catch (e: Exception) {
-                      // This phone or app refused the effect; nothing else to do.
+                      // This phone or app refused the effect.
                   }
               }
 
