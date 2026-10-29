@@ -1,0 +1,52 @@
+                          false, 0, true, 1, false, 0, true
+                      )
+                          .setMbcBandAllChannelsTo(0, band())
+                          .setLimiterAllChannelsTo(
+                              DynamicsProcessing.Limiter(true, true, 0, 1f, 60f, 10f, -2f, 0f)
+                          )
+                          .build()
+                      val dp = DynamicsProcessing(0, session, cfg)
+                      dp.enabled = true
+                      effects[session] = dp
+                  } catch (e: Exception) {
+                      // This phone or app refused the effect; nothing else to do.
+                  }
+              }
+
+              private fun release(session: Int) {
+                  effects.remove(session)?.release()
+              }
+
+              private fun notification(): Notification {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("leveler", "Voice Leveler", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  return Notification.Builder(this, "leveler")
+                      .setContentTitle("Voice Leveler is on")
+                      .setContentText("Keeping volume steady")
+                      .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
+                      .build()
+              }
+
+              override fun onDestroy() {
+                  unregisterReceiver(receiver)
+                  effects.values.forEach { it.release() }
+                  effects.clear()
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              companion object {
+                  const val ACTION_STOP = "stop"
+                  const val EXTRA_STRENGTH = "strength"
+              }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leveler-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
